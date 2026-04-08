@@ -203,6 +203,12 @@ export abstract class Strategy implements StrategyInterface {
 
   public settings: DCABotSettings
 
+  private comboNameFlags?: {
+    trailingTp: boolean
+    trailingTpPerc?: string
+    liqOff: boolean
+  }
+
   private readonly botFunctions: Map<string, DCABotFunctions> = new Map()
 
   static get workingShift(): { start: number; end?: number }[] {
@@ -704,16 +710,73 @@ export abstract class Strategy implements StrategyInterface {
     StrategyContextManager.getActiveContext().previousResult = value
   }
 
-  private applyComboBacktestOverrides(settings: DCABotSettings) {
-    if (Strategy.combo) {
-      return {
-        ...settings,
-        trailingTp: true,
-        trailingTpPerc: '5',
+  private parseComboBacktestNameFlags(name?: string) {
+    const trimmedName = `${name ?? ''}`.trim()
+    const [baseNameRaw, rawFlags] = trimmedName.split('#', 2)
+    const baseName = baseNameRaw.trim()
+    const parsed: {
+      baseName: string
+      trailingTp?: boolean
+      trailingTpPerc?: string
+      liqOff?: boolean
+    } = { baseName }
+
+    if (!rawFlags) {
+      return parsed
+    }
+
+    for (const token of rawFlags.trim().split(/\s+/)) {
+      const [rawKey, rawValue] = token.split('=', 2)
+      if (!rawKey || typeof rawValue === 'undefined') {
+        continue
+      }
+      const key = rawKey.trim().toLowerCase()
+      const value = rawValue.trim()
+      if (key === 'ttp') {
+        if (value === '1') {
+          parsed.trailingTp = true
+        } else if (value === '0') {
+          parsed.trailingTp = false
+        }
+      } else if (key === 'ttpperc' && checkNumber(value)) {
+        parsed.trailingTpPerc = value
+      } else if (key === 'liqoff') {
+        if (value === '1') {
+          parsed.liqOff = true
+        } else if (value === '0') {
+          parsed.liqOff = false
+        }
       }
     }
 
-    return settings
+    return parsed
+  }
+
+  private applyComboBacktestOverrides(settings: DCABotSettings) {
+    if (!Strategy.combo) {
+      this.comboNameFlags = undefined
+      return settings
+    }
+
+    const parsedName = this.parseComboBacktestNameFlags(settings.name)
+    const trailingTp = parsedName.trailingTp ?? false
+    const trailingTpPerc = trailingTp
+      ? parsedName.trailingTpPerc ?? '5'
+      : settings.trailingTpPerc
+    const liqOff = parsedName.liqOff ?? false
+    this.comboNameFlags = {
+      trailingTp,
+      trailingTpPerc,
+      liqOff,
+    }
+
+    return {
+      ...settings,
+      name: parsedName.baseName || settings.name,
+      trailingTp,
+      trailingTpPerc,
+      skipBalanceCheck: liqOff,
+    }
   }
 
   constructor(input: StrategyInput) {
@@ -4005,7 +4068,8 @@ export abstract class Strategy implements StrategyInterface {
     } else if (
       ((botFunctions.isTrailingSl && d.trailingMode === TrailingModeEnum.tsl) ||
         (botFunctions.isTrailingTp &&
-          d.trailingMode === TrailingModeEnum.ttp))
+          d.trailingMode === TrailingModeEnum.ttp)) &&
+      !Strategy.combo
     ) {
       if (d.trailingMode && d.trailingLevel) {
         if (
@@ -4065,7 +4129,14 @@ export abstract class Strategy implements StrategyInterface {
         const useSl =
           this.settings.useSl &&
           this.settings.dealCloseConditionSL === CloseConditionEnum.tp
-        const useTrailingTp = useTp && botFunctions.isTrailingTp
+        const useTrailingTp =
+          useTp &&
+          (Strategy.combo
+            ? (this.comboNameFlags?.trailingTp ?? false)
+            : botFunctions.isTrailingTp)
+        const comboTrailingTpPerc = +(
+          this.comboNameFlags?.trailingTpPerc ?? '5'
+        )
         const price = b.close
         const qty = Math.max(
           this.long
@@ -4102,16 +4173,35 @@ export abstract class Strategy implements StrategyInterface {
               ? usageQuote * (this.profitBase ? 1 / price : 1)
               : usageBase * (this.profitBase ? 1 : price)) / this.leverage
         const perc = total / denominator
+        const percValue = perc * 100
         if (useTrailingTp) {
-          d = this.checkTrailing(d, price, b.time)
           if (
-            d.trailingMode === TrailingModeEnum.ttp &&
-            d.trailingLevel &&
-            ((this.long && b.low <= d.trailingLevel) ||
-              (!this.long && b.high >= d.trailingLevel))
+            isFinite(Math.abs(perc)) &&
+            !isNaN(perc) &&
+            !isNaN(this.math.round(percValue))
           ) {
-            close = true
-            closePrice = d.trailingLevel
+            if (d.trailingMode !== TrailingModeEnum.ttp && tpPerc <= percValue) {
+              d.trailingMode = TrailingModeEnum.ttp
+              d.bestPrice = percValue
+              d.trailingLevel = percValue - comboTrailingTpPerc
+            } else if (d.trailingMode === TrailingModeEnum.ttp) {
+              d.bestPrice = Math.max(d.bestPrice ?? percValue, percValue)
+              d.trailingLevel = (d.bestPrice ?? percValue) - comboTrailingTpPerc
+              if (percValue <= (d.trailingLevel ?? -Infinity)) {
+                close = true
+                const trailingPerc = d.trailingLevel ?? percValue
+                const requiredPrice = this.profitBase
+                  ? -(quote * (this.long ? 1 : -1)) /
+                    (denominator * (trailingPerc / 100) +
+                      commission -
+                      qty * (this.long ? 1 : -1))
+                  : (denominator * (trailingPerc / 100) +
+                      commission +
+                      quote * (this.long ? 1 : -1)) /
+                    (qty * (this.long ? 1 : -1))
+                closePrice = requiredPrice
+              }
+            }
           }
         }
         if (
@@ -4628,6 +4718,9 @@ export abstract class Strategy implements StrategyInterface {
   }
 
   private checkTrailing(d: Deal, price: number, time: number) {
+    if (Strategy.combo) {
+      return d
+    }
     const botFunctions = this.botFunctions.get(d.symbol.pair)
     if (!botFunctions) {
       return d
@@ -4637,6 +4730,10 @@ export abstract class Strategy implements StrategyInterface {
     }
     const { trailingSl, trailingTp, trailingTpPerc, tpPerc, slPerc } =
       this.settings
+    const effectiveTrailingTpPerc =
+      Strategy.combo && this.comboNameFlags?.trailingTp
+        ? this.comboNameFlags.trailingTpPerc ?? '5'
+        : trailingTpPerc
     const sellDisplacement = this.userFee * 2
     if (!d.bestPrice && d.bestPriceSet) {
       d.bestPrice = Math.max(price, d.startPrice)
@@ -4654,7 +4751,10 @@ export abstract class Strategy implements StrategyInterface {
       const unPnL = this.long
         ? (price - d.avgPrice) / d.avgPrice
         : (d.avgPrice - price) / d.avgPrice
-      if (trailingTpPerc && unPnL > +tpPerc / 100 + sellDisplacement) {
+      if (
+        effectiveTrailingTpPerc &&
+        unPnL > +tpPerc / 100 + sellDisplacement
+      ) {
         d.trailingMode = TrailingModeEnum.ttp
       }
     }
@@ -4663,11 +4763,12 @@ export abstract class Strategy implements StrategyInterface {
     }
     const sl = (+slPerc / 100 + this.userFee * 2) * (this.long ? 1 : -1)
     const tp =
-      (+(trailingTpPerc ?? '0') / 100 + this.userFee * 2) * (this.long ? 1 : -1)
+      (+(effectiveTrailingTpPerc ?? '0') / 100 + this.userFee * 2) *
+      (this.long ? 1 : -1)
     const newTrailingLevel = d.bestPrice
       ? d.trailingMode === TrailingModeEnum.tsl && slPerc
         ? d.bestPrice * (1 + sl)
-        : d.trailingMode === TrailingModeEnum.ttp && trailingTpPerc
+        : d.trailingMode === TrailingModeEnum.ttp && effectiveTrailingTpPerc
           ? d.bestPrice * (1 - tp)
           : 0
       : 0
@@ -4699,7 +4800,9 @@ export abstract class Strategy implements StrategyInterface {
       Strategy.maxPrice.set(b.symbol, b.high)
     }
     const close =
-      !this.settings.skipBalanceCheck &&
+      !(Strategy.combo
+        ? (this.comboNameFlags?.liqOff ?? false)
+        : this.settings.skipBalanceCheck) &&
       (long
         ? current.liquidationPrice > price
         : current.liquidationPrice < price)
