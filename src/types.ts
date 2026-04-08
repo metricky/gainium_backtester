@@ -851,6 +851,7 @@ export interface DCABotSettings extends BaseSettings {
   multiSl?: MultiTP[]
   marginType?: BotMarginTypeEnum
   leverage?: number
+  skipBalanceCheck?: boolean
   futures?: boolean
   coinm?: boolean
   gridLevel?: string

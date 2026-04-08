@@ -4666,9 +4666,11 @@ export abstract class Strategy implements StrategyInterface {
     if (maxPrice === 0 || maxPrice < b.high) {
       Strategy.maxPrice.set(b.symbol, b.high)
     }
-    const close = long
-      ? current.liquidationPrice > price
-      : current.liquidationPrice < price
+    const close =
+      !this.settings.skipBalanceCheck &&
+      (long
+        ? current.liquidationPrice > price
+        : current.liquidationPrice < price)
     if (close) {
       const allDeals = Strategy.getDeals('open', b.symbol)
       for (const d of allDeals) {
