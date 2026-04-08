@@ -704,6 +704,18 @@ export abstract class Strategy implements StrategyInterface {
     StrategyContextManager.getActiveContext().previousResult = value
   }
 
+  private applyComboBacktestOverrides(settings: DCABotSettings) {
+    if (Strategy.combo) {
+      return {
+        ...settings,
+        trailingTp: true,
+        trailingTpPerc: '5',
+      }
+    }
+
+    return settings
+  }
+
   constructor(input: StrategyInput) {
     const {
       settings,
@@ -727,7 +739,7 @@ export abstract class Strategy implements StrategyInterface {
     Strategy.multi = !!multi
     Strategy.trades = trades
     Strategy.combo = !!combo
-    this.settings = settings
+    this.settings = this.applyComboBacktestOverrides(settings)
 
     Strategy.status =
       (this.settings.botActualStart === BotStartTypeEnum.price ||
@@ -754,8 +766,8 @@ export abstract class Strategy implements StrategyInterface {
     prices = prices.filter((p) => (p.exchange ? p.exchange === exchange : true))
     for (const s of symbols) {
       const bu = Strategy.combo
-        ? new ComboBotFunctions(settings, s, userFee, trades)
-        : new DCABotFunctions(settings, s, userFee)
+        ? new ComboBotFunctions(this.settings, s, userFee, trades)
+        : new DCABotFunctions(this.settings, s, userFee)
       this.symbols.set(s.pair, s)
       this.botFunctions.set(s.pair, bu)
       this.usdRate.set(
@@ -788,7 +800,14 @@ export abstract class Strategy implements StrategyInterface {
   }
 
   public set settingsUpdate(settings: DCABotSettings) {
-    this.settings = settings
+    this.settings = this.applyComboBacktestOverrides(settings)
+    for (const [pair, botFunctions] of this.botFunctions.entries()) {
+      const symbol = this.symbols.get(pair)
+      if (!symbol) {
+        continue
+      }
+      botFunctions.all = { settings: this.settings, symbol }
+    }
   }
 
   public set _start(value: number) {
@@ -3986,8 +4005,7 @@ export abstract class Strategy implements StrategyInterface {
     } else if (
       ((botFunctions.isTrailingSl && d.trailingMode === TrailingModeEnum.tsl) ||
         (botFunctions.isTrailingTp &&
-          d.trailingMode === TrailingModeEnum.ttp)) &&
-      !Strategy.combo
+          d.trailingMode === TrailingModeEnum.ttp))
     ) {
       if (d.trailingMode && d.trailingLevel) {
         if (
@@ -4047,6 +4065,7 @@ export abstract class Strategy implements StrategyInterface {
         const useSl =
           this.settings.useSl &&
           this.settings.dealCloseConditionSL === CloseConditionEnum.tp
+        const useTrailingTp = useTp && botFunctions.isTrailingTp
         const price = b.close
         const qty = Math.max(
           this.long
@@ -4083,6 +4102,18 @@ export abstract class Strategy implements StrategyInterface {
               ? usageQuote * (this.profitBase ? 1 / price : 1)
               : usageBase * (this.profitBase ? 1 : price)) / this.leverage
         const perc = total / denominator
+        if (useTrailingTp) {
+          d = this.checkTrailing(d, price, b.time)
+          if (
+            d.trailingMode === TrailingModeEnum.ttp &&
+            d.trailingLevel &&
+            ((this.long && b.low <= d.trailingLevel) ||
+              (!this.long && b.high >= d.trailingLevel))
+          ) {
+            close = true
+            closePrice = d.trailingLevel
+          }
+        }
         if (
           isFinite(Math.abs(perc)) &&
           !isNaN(perc) &&
@@ -4107,6 +4138,7 @@ export abstract class Strategy implements StrategyInterface {
           !isNaN(perc) &&
           !isNaN(this.math.round(perc * 100)) &&
           useTp &&
+          !useTrailingTp &&
           tpPerc <= perc * 100
         ) {
           close = true
@@ -4639,7 +4671,7 @@ export abstract class Strategy implements StrategyInterface {
           ? d.bestPrice * (1 - tp)
           : 0
       : 0
-    if (newTrailingLevel !== d.trailingLevel && !Strategy.combo) {
+    if (newTrailingLevel !== d.trailingLevel) {
       d.trailingLevel = newTrailingLevel
       const newSl = this.getSlHistoryLine(d, time)
       d = this.replaceSlHistoryLine(d, newSl, time)
