@@ -711,8 +711,12 @@ export abstract class Strategy implements StrategyInterface {
   }
 
   private parseComboBacktestNameFlags(name?: string) {
-    const trimmedName = `${name ?? ''}`.trim()
-    const [baseNameRaw, rawFlags] = trimmedName.split('#', 2)
+      const trimmedName = `${name ?? ''}`.trim()
+    const separatorIndex = trimmedName.search(/[|#]/)
+    const baseNameRaw =
+      separatorIndex >= 0 ? trimmedName.slice(0, separatorIndex) : trimmedName
+    const rawFlags =
+      separatorIndex >= 0 ? trimmedName.slice(separatorIndex + 1) : undefined
     const baseName = baseNameRaw.trim()
     const parsed: {
       baseName: string
