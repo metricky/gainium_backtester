@@ -5,6 +5,15 @@ All notable changes to the Gainium Backtester library will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.6.5] - 2026-07-29
+
+### Fixed
+- DCA `periodicStats`: the monthly bucket loop stepped by a fixed 28 days instead of
+  advancing to the start of the next calendar month, so the trailing month was dropped
+  whenever the range's tail after the last 28-day sample point was shorter than 28 days.
+  Affected any DCA/combo/hedge backtest, not only sub-28-day ranges — the deals still
+  appeared in the yearly bucket, leaving a yearly total with no matching monthly row.
+
 ## [1.6.4] - 2026-06-11
 
 ### Fixed

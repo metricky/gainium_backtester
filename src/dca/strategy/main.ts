@@ -6650,17 +6650,22 @@ export abstract class Strategy implements StrategyInterface {
     let monthlyValue = Strategy.initialBalanceUsd
 
     if (allDeals.length < maxDealsPerResult) {
-      for (
-        let i = firstDataTime;
-        i < lastDataTime;
-        i += 28 * 24 * 60 * 60 * 1000
-      ) {
+      // Step to the start of the next CALENDAR month, not by a fixed 28 days:
+      // a 28d step is shorter than every real month, so the last sample point
+      // can land well before `lastDataTime` and the trailing month never gets
+      // a bucket (see the sibling yearly loop, which solves the same problem by
+      // overshooting its bound by one period).
+      let i = firstDataTime
+      while (i < lastDataTime) {
         const monthlyStart = new Date(i)
         monthlyStart.setDate(1)
         monthlyStart.setHours(0, 0, 0, 0)
         const nextMonth = new Date(monthlyStart)
         nextMonth.setDate(1)
         nextMonth.setMonth(nextMonth.getMonth() + 1)
+        // `nextMonth` is always > `i` (i lies inside [monthlyStart, nextMonth)),
+        // so the loop always advances.
+        i = +nextMonth
         const findMonth = periodicStats.find(
           (p) => p.startTime === +monthlyStart && p.period === 'month',
         )
