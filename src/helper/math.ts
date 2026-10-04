@@ -193,4 +193,28 @@ export class MathHelper {
     const multiplier = Number(`1e${e}`)
     return ((a * multiplier) % (b * multiplier)) / multiplier
   }
+
+  /**
+   * How far `a` sits above the `b` grid, reading a value that is already a
+   * whole number of `b` steps as 0. Neither a native `a % b` nor `remainder()`
+   * does: `0.145 % 0.001` is `0.000999…`, so a quantity that is already a
+   * whole number of lot steps looks one step short and the order builders
+   * round it up by a full lot. Falls back to `remainder()` for a value that is
+   * genuinely off the grid.
+   */
+  gridRemainder(a: number, b: number) {
+    const ratio = a / b
+    // The float noise in `a / b` grows with the ratio, so a fixed tolerance
+    // runs out on a large quantity against a small step. The cap keeps the
+    // tolerance far below the smallest gap a genuinely off-grid quantity
+    // shows (a sizeable fraction of a step), so a real remainder survives.
+    const tolerance = Math.min(
+      1e-3,
+      Math.max(this.eps, Math.abs(ratio) * this.eps),
+    )
+    if (Math.abs(ratio - Math.round(ratio)) <= tolerance) {
+      return 0
+    }
+    return this.remainder(a, b)
+  }
 }

@@ -767,56 +767,112 @@ export class Strategy implements StrategyInterface {
           (this.profitBase ? comBase : comQuote)
     profitUsd = profit * this.usdRate
     freeProfitUsd = (freeProfit || profit) * this.usdRate
+    this.pushTransaction({
+      side,
+      filledTime,
+      price,
+      matchedPrice,
+      amountBaseBuy,
+      amountFreeBaseBuy,
+      amountQuoteBuy,
+      amountFreeQuoteBuy,
+      amountBaseSell,
+      amountFreeBaseSell,
+      amountQuoteSell,
+      amountFreeQuoteSell,
+      profit,
+      profitUsd,
+      freeProfit,
+      freeProfitUsd,
+      idBuy: order.side === BotOrderSideEnum.buy ? order.id : matchedId,
+      idSell: order.side === BotOrderSideEnum.buy ? matchedId : order.id,
+      executor: order.id,
+    })
+    this.freeTotalProfit += freeProfit
+    this.totalProfit += profit
+    this.totalProfitUsd += profitUsd
+  }
+
+  /**
+   * Build and file one row of the transaction ledger.
+   *
+   * Every backtest transaction goes through here — a grid fill
+   * (`createTransaction`) and the `stopAndSell` force close (`closeBot`)
+   * alike — so the Transactions list always reconciles with the reported
+   * totals. Profit *accrual* stays with the caller: the two convert to USD
+   * differently (`usdRate` vs `usdRateQuote` with the coin-m factor).
+   */
+  private pushTransaction(t: {
+    side: BotOrderSideEnum
+    filledTime: number
+    price: number
+    matchedPrice: number
+    amountBaseBuy: number
+    amountFreeBaseBuy: number
+    amountQuoteBuy: number
+    amountFreeQuoteBuy: number
+    amountBaseSell: number
+    amountFreeBaseSell: number
+    amountQuoteSell: number
+    amountFreeQuoteSell: number
+    profit: number
+    profitUsd: number
+    freeProfit: number
+    freeProfitUsd: number
+    idBuy: string
+    idSell: string
+    executor: string
+  }) {
     this.cummulativeProfit = {
-      base: this.profitBase ? this.cummulativeProfit.base + profit : 0,
-      quote: this.profitBase ? 0 : this.cummulativeProfit.quote + profit,
-      usd: this.cummulativeProfit.usd + profitUsd,
+      base: this.profitBase ? this.cummulativeProfit.base + t.profit : 0,
+      quote: this.profitBase ? 0 : this.cummulativeProfit.quote + t.profit,
+      usd: this.cummulativeProfit.usd + t.profitUsd,
     }
     const transaction: BacktestingTransaction = {
       _id: v4(),
-      updateTime: filledTime,
-      side,
+      updateTime: t.filledTime,
+      side: t.side,
       amountBaseBuy: this.math.convertFromExponential(
-        this.math.round(amountBaseBuy, this.allPrecision.base),
+        this.math.round(t.amountBaseBuy, this.allPrecision.base),
         this.allPrecision.base,
       ),
-      amountFreeBaseBuy,
+      amountFreeBaseBuy: t.amountFreeBaseBuy,
       amountQuoteBuy: this.math.convertFromExponential(
-        this.math.round(amountQuoteBuy, this.allPrecision.quote),
+        this.math.round(t.amountQuoteBuy, this.allPrecision.quote),
         this.allPrecision.quote,
       ),
-      amountFreeQuoteBuy,
+      amountFreeQuoteBuy: t.amountFreeQuoteBuy,
       amountBaseSell: this.math.convertFromExponential(
-        this.math.round(amountBaseSell, this.allPrecision.base),
+        this.math.round(t.amountBaseSell, this.allPrecision.base),
         this.allPrecision.base,
       ),
-      amountFreeBaseSell,
+      amountFreeBaseSell: t.amountFreeBaseSell,
       amountQuoteSell: this.math.convertFromExponential(
-        this.math.round(amountQuoteSell, this.allPrecision.quote),
+        this.math.round(t.amountQuoteSell, this.allPrecision.quote),
         this.allPrecision.quote,
       ),
-      amountFreeQuoteSell,
+      amountFreeQuoteSell: t.amountFreeQuoteSell,
       priceSell: this.math.convertFromExponential(
         this.math.round(
-          side === BotOrderSideEnum.sell ? price : matchedPrice,
+          t.side === BotOrderSideEnum.sell ? t.price : t.matchedPrice,
           this.symbol.priceAssetPrecision,
         ),
         this.symbol.priceAssetPrecision,
       ),
       priceBuy: this.math.convertFromExponential(
         this.math.round(
-          side === BotOrderSideEnum.buy ? price : matchedPrice,
+          t.side === BotOrderSideEnum.buy ? t.price : t.matchedPrice,
           this.symbol.priceAssetPrecision,
         ),
         this.symbol.priceAssetPrecision,
       ),
       profit: this.math.convertFromExponential(
-        this.math.round(profit, this.precision + 3),
+        this.math.round(t.profit, this.precision + 3),
         this.precision + 3,
       ),
-      profitUsd: this.math.round(profitUsd, 2),
-      freeProfit,
-      freeProfitUsd,
+      profitUsd: this.math.round(t.profitUsd, 2),
+      freeProfit: t.freeProfit,
+      freeProfitUsd: t.freeProfitUsd,
       baseAsset: this.symbol.baseAsset.name,
       quoteAsset: this.symbol.quoteAsset.name,
       profitAsset: this.futures
@@ -827,17 +883,14 @@ export class Strategy implements StrategyInterface {
           ? this.symbol.baseAsset.name
           : this.symbol.quoteAsset.name,
       index: this.transactionIndex,
-      idBuy: order.side === BotOrderSideEnum.buy ? order.id : matchedId,
-      idSell: order.side === BotOrderSideEnum.buy ? matchedId : order.id,
-      executor: order.id,
+      idBuy: t.idBuy,
+      idSell: t.idSell,
+      executor: t.executor,
       cummulativeProfitBase: this.cummulativeProfit.base,
       cummulativeProfitQuote: this.cummulativeProfit.quote,
       cummulativeProfitUsdt: this.cummulativeProfit.usd,
     }
     this.transactionIndex++
-    this.freeTotalProfit += freeProfit
-    this.totalProfit += profit
-    this.totalProfitUsd += profitUsd
     this.transactions.push(transaction)
   }
 
@@ -1182,16 +1235,13 @@ export class Strategy implements StrategyInterface {
         if (lastPrice <= +tpTopPrice) {
           return TpSlReturn.tp
         }
-      } else if (
-        slCondition === 'priceReached' &&
-        slLowPrice &&
-        sl &&
-        this.isShort
-      ) {
-        if (lastPrice <= +slLowPrice) {
+      }
+      if (slCondition === 'priceReached' && slLowPrice && sl && this.isShort) {
+        if (lastPrice >= +slLowPrice) {
           return TpSlReturn.sl
         }
-      } else if (
+      }
+      if (
         tpSlCondition === 'priceReached' &&
         tpTopPrice &&
         tpSl &&
@@ -1200,16 +1250,13 @@ export class Strategy implements StrategyInterface {
         if (lastPrice >= +tpTopPrice) {
           return TpSlReturn.tp
         }
-      } else if (
-        slCondition === 'priceReached' &&
-        slLowPrice &&
-        sl &&
-        !this.isShort
-      ) {
+      }
+      if (slCondition === 'priceReached' && slLowPrice && sl && !this.isShort) {
         if (lastPrice <= +slLowPrice) {
           return TpSlReturn.sl
         }
-      } else if (
+      }
+      if (
         (tpSlCondition === 'valueChanged' &&
           tpPerc &&
           initialPriceStart &&
@@ -1292,16 +1339,66 @@ export class Strategy implements StrategyInterface {
     ) {
       if (this.futures) {
         const current = this.position
-        const diff =
-          ((price - current.entryPrice) *
-            (current.side === PositionSide.LONG ? 1 : -1)) /
-          current.entryPrice
-        const profit = this.coinm
-          ? current.qty * diff
-          : current.qty * current.entryPrice * diff
+        // A force close can land on a bar where the net position is flat — a
+        // neutral grid passes through qty 0 whenever its legs are all matched.
+        // Dividing by entryPrice 0 there makes diff Infinity and profit NaN,
+        // which poisons totalProfit and zeroes the whole reported result.
+        const hasPosition = current.qty > 0 && current.entryPrice > 0
+        const diff = hasPosition
+          ? ((price - current.entryPrice) *
+              (current.side === PositionSide.LONG ? 1 : -1)) /
+            current.entryPrice
+          : 0
+        const profit = hasPosition
+          ? this.coinm
+            ? current.qty * diff
+            : current.qty * current.entryPrice * diff
+          : 0
+        const profitUsd = profit * (this.coinm ? price : 1) * this.usdRateQuote
+        // The force close is a real order — file it in the ledger with the P&L
+        // accrued just below, matched against the position price the same way a
+        // directional futures fill is, so the Transactions list reconciles with
+        // profitTotal instead of ending on the last grid fill.
+        if (hasPosition) {
+          const side =
+            current.side === PositionSide.LONG
+              ? BotOrderSideEnum.sell
+              : BotOrderSideEnum.buy
+          const matchQty = this.profitBase
+            ? (price * current.qty) / current.entryPrice
+            : current.qty
+          const close = { base: current.qty, quote: current.qty * price }
+          const entry = {
+            base: matchQty,
+            quote: matchQty * current.entryPrice,
+          }
+          const buy = side === BotOrderSideEnum.buy ? close : entry
+          const sell = side === BotOrderSideEnum.buy ? entry : close
+          const closeId = this.botFunctions.utils.id(20)
+          this.pushTransaction({
+            side,
+            filledTime: time,
+            price,
+            matchedPrice: current.entryPrice,
+            amountBaseBuy: buy.base,
+            amountFreeBaseBuy: buy.base,
+            amountQuoteBuy: buy.quote,
+            amountFreeQuoteBuy: buy.quote,
+            amountBaseSell: sell.base,
+            amountFreeBaseSell: sell.base,
+            amountQuoteSell: sell.quote,
+            amountFreeQuoteSell: sell.quote,
+            profit,
+            profitUsd,
+            freeProfit: profit,
+            freeProfitUsd: profitUsd,
+            idBuy: side === BotOrderSideEnum.buy ? closeId : 'position price',
+            idSell: side === BotOrderSideEnum.buy ? 'position price' : closeId,
+            executor: closeId,
+          })
+        }
         this.totalProfit += profit
-        this.totalProfitUsd +=
-          profit * (this.coinm ? price : 1) * this.usdRateQuote
+        this.totalProfitUsd += profitUsd
         this.currentBalances = this.initialBalances + this.totalProfit
         this.currentBalancesUsd =
           this.currentBalances * (this.coinm ? price : 1) * this.usdRateQuote

@@ -827,6 +827,10 @@ export interface DCABotSettings extends BaseSettings {
   closeAfterXwin?: string
   useCloseAfterXloss?: boolean
   closeAfterXloss?: string
+  useCloseAfterXconsecutiveWin?: boolean
+  closeAfterXconsecutiveWin?: string
+  useCloseAfterXconsecutiveLoss?: boolean
+  closeAfterXconsecutiveLoss?: string
   useCloseAfterXprofit?: boolean
   closeAfterXprofitValue?: string
   closeAfterXprofitCond?: IndicatorStartConditionEnum
@@ -1317,6 +1321,8 @@ export type Deal = {
   lastIndex: number
   dynamicAr?: DynamicArPrices[]
   sizes?: Sizes
+  /** 1.8.0 — values a host set on this deal; absent = the bot's settings */
+  settingsOverride?: DealSettingsOverride
 }
 
 export type PreparedGrid = {
@@ -1400,7 +1406,63 @@ export enum EdgeBacktestEnum {
 export type DCABacktestingInput = BacktestingInput<DCABotSettings> & {
   edge?: EdgeBacktestEnum
   previousData?: DCABacktestingResult
+  /**
+   * Optional host hooks (1.8.0). Absent — the default everywhere, including
+   * every dashboard — the engine runs exactly as before.
+   */
+  hooks?: DCABacktestHooks
 }
+
+/** A deal the start condition is about to open (all engine gates passed). */
+export type NewDealApprovalContext = {
+  symbol: string
+  /** the price the deal would open at */
+  price: number
+  /** the engine time of the open (bar time) */
+  time: number
+}
+
+/** A signal-based (indicator) take-profit close about to happen. */
+export type DealCloseApprovalContext = {
+  dealId: string
+  symbol: string
+  /** the price the close would fill at */
+  price: number
+  time: number
+  trigger: 'indicator'
+}
+
+/** The engine finished every bar of the lowest interval at `time`. */
+export type BarHookContext = {
+  /** open time of the bar(s) just processed */
+  time: number
+  interval: ExchangeIntervals
+}
+
+/**
+ * Optional hooks for a host that drives the engine (main-app's server-side
+ * runner). They are synchronous: the engine asks and continues with the
+ * answer on the same bar, exactly where it would have acted. `true` (or a hook
+ * that throws) is the engine's own behaviour.
+ */
+export type DCABacktestHooks = {
+  approveNewDeal?: (ctx: NewDealApprovalContext) => boolean
+  approveDealClose?: (ctx: DealCloseApprovalContext) => boolean
+  afterBar?: (ctx: BarHookContext) => void
+}
+
+/** Per-deal values a host may set (1.8.0); absent = the bot's settings. */
+export type DealSettingsOverride = Partial<
+  Pick<
+    DCABotSettings,
+    | 'tpPerc'
+    | 'slPerc'
+    | 'useSl'
+    | 'trailingTp'
+    | 'trailingTpPerc'
+    | 'trailingSl'
+  >
+>
 
 export type BacktestingInput<T> = {
   exchange: ExchangeEnum

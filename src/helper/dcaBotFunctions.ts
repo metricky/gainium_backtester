@@ -313,7 +313,7 @@ class DCABotFunctions {
         )
       }
     }
-    const mod = baseOrder.qty % symbol.baseAsset.step
+    const mod = this.math.gridRemainder(baseOrder.qty, symbol.baseAsset.step)
     if (mod > Number.EPSILON) {
       baseOrder.qty = this.math.round(
         baseOrder.qty - mod + symbol.baseAsset.step,
@@ -476,6 +476,11 @@ class DCABotFunctions {
       if (maxVolumeSize < 0) {
         maxVolumeSize = Infinity
       }
+      // Unrounded running level of the percentage ladder. Each level is
+      // `step × scale^(i-1)` of the start price beyond the one before; only
+      // the level itself is rounded to the tick, so the rounding does not carry
+      // into every level after it.
+      let percentageLevel = latestPrice
       for (let i = 1; i <= ordersCount; i++) {
         if (scaleAr && !dcaArValues.length) {
           continue
@@ -491,13 +496,11 @@ class DCABotFunctions {
           useVolumeChange
             ? 1
             : volumeScale ** (i - 1)
-        let price = this.math.round(
-          (i === 1 ? latestPrice : orders[orders.length - 1].price) -
-            (settings.strategy === StrategyEnum.long ? 1 : -1) *
-              gridStep *
-              stepVal,
-          symbol.priceAssetPrecision,
-        )
+        percentageLevel -=
+          (settings.strategy === StrategyEnum.long ? 1 : -1) *
+          gridStep *
+          stepVal
+        let price = this.math.round(percentageLevel, symbol.priceAssetPrecision)
         if (settings.dcaCondition === DCAConditionEnum.indicators) {
           const indicatorValue =
             +(
@@ -573,7 +576,18 @@ class DCABotFunctions {
           }
         }
         if (i > 1) {
-          if (price === orders[orders.length - 1].price) {
+          const prevPrice = orders[orders.length - 1].price
+          if (
+            price === prevPrice ||
+            // A percentage level rounded off the unrounded ladder can land
+            // behind the previous one when this guard pushed that one a tick
+            // further.
+            (settings.dcaCondition !== DCAConditionEnum.indicators &&
+              settings.dcaCondition !== DCAConditionEnum.custom &&
+              (settings.strategy === StrategyEnum.long
+                ? price > prevPrice
+                : price < prevPrice))
+          ) {
             price = this.math.round(
               orders[orders.length - 1].price +
                 (settings.strategy === StrategyEnum.long ? -1 : 1) *
@@ -713,7 +727,7 @@ class DCABotFunctions {
             )
           }
         }
-        const modQty = qty % symbol.baseAsset.step
+        const modQty = this.math.gridRemainder(qty, symbol.baseAsset.step)
         if (modQty !== 0) {
           qty = this.math.round(
             qty - modQty + symbol.baseAsset.step,

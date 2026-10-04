@@ -1013,12 +1013,11 @@ class TIStrategy extends Strategy implements StrategyInterface {
           Strategy.status === 'monitoring')) &&
       nextBar
     ) {
+      // helper children of an MA/XO crossing are registered with `ignore: true`
+      // and are read by id where the crossing needs them; only the user's own
+      // indicators are evaluated here
       const currentState = [...Strategy.indicators].filter(
-        (i) =>
-          i.id !== `${i.settings.maUUID}@${nextBar.symbol}` &&
-          `${i.settings.xoUUID}@${nextBar.symbol}` &&
-          i.data.length > 0 &&
-          i.symbol === nextBar.symbol,
+        (i) => !i.ignore && i.data.length > 0 && i.symbol === nextBar.symbol,
       )
       //Strategy.indicators = Strategy.indicators.map((i) => ({ ...i, data: [] }))
       for (const i of currentState) {

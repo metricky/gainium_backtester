@@ -36,7 +36,7 @@ const getStrategyBySettings = (
       settings.useTp &&
       settings.startCondition !== StartConditionEnum.ti) ||
       ((settings.dealCloseConditionSL === CloseConditionEnum.techInd ||
-        settings.dealCloseCondition === CloseConditionEnum.dynamicAr) &&
+        settings.dealCloseConditionSL === CloseConditionEnum.dynamicAr) &&
         settings.useSl &&
         settings.startCondition !== StartConditionEnum.ti) ||
       ((settings.dcaCondition === DCAConditionEnum.indicators ||

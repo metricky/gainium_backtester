@@ -5,6 +5,7 @@ import type { StrategyInput } from './main'
 import type { ExchangeIntervals, FullBar, TradeResponse } from '../../types'
 
 import { timeIntervalMap, DirName } from '../../types'
+import { StrategyContextManager } from './context'
 
 let getFileLinesSync: (
   file: string,
@@ -75,6 +76,8 @@ class CombinedStrategy extends Strategy implements StrategyInterface {
   ) {
     Strategy.resetData()
     super(input)
+    // 1.8.0: set after the reset; undefined (the default) keeps every hook off
+    Strategy.hooks = input.hooks
     this.strategies = strategies.map((s) => s(input))
     Strategy.fullResult = input.fullResult
     Strategy.useFile = input.useFile && typeof window === 'undefined'
@@ -207,6 +210,9 @@ class CombinedStrategy extends Strategy implements StrategyInterface {
     updateProgress?: (value: number, text: string) => void,
     _size?: number,
   ): Promise<void> {
+    if (Strategy.hooks) {
+      this.beforeHostBar(b, interval)
+    }
     Strategy.lastPrice.set(b.symbol, b.close)
     if (interval === Strategy.lowestInterval) {
       const size = _size || Strategy?.data?.[0]?.bar?.length || 0
@@ -241,6 +247,37 @@ class CombinedStrategy extends Strategy implements StrategyInterface {
         return
       }
       await s.processBar(checkPortfolio, b, interval)
+    }
+  }
+
+  /**
+   * 1.8.0 — before the engine moves to a later bar, tell the host that every
+   * bar of the lowest interval at the previous time is done (`afterBar`).
+   */
+  private beforeHostBar(b: FullBar, interval: ExchangeIntervals): void {
+    const ctx = StrategyContextManager.getActiveContext()
+    const afterBar = Strategy.hooks?.afterBar
+    if (
+      afterBar &&
+      b.time > ctx.hookBarTime &&
+      ctx.hookBarTime >= 0 &&
+      ctx.hookAfterBarTime < ctx.hookBarTime
+    ) {
+      ctx.hookAfterBarTime = ctx.hookBarTime
+      try {
+        afterBar({
+          time: ctx.hookBarTime,
+          interval: Strategy.lowestInterval ?? interval,
+        })
+      } catch {
+        // a failing host must not stop the backtest
+      }
+    }
+    if (
+      interval === (Strategy.lowestInterval ?? interval) &&
+      b.time > ctx.hookBarTime
+    ) {
+      ctx.hookBarTime = b.time
     }
   }
 

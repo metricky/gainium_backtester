@@ -7,6 +7,7 @@ import type {
   PositionSide,
   EdgeBacktestEnum,
   DCABacktestingResult,
+  DCABacktestHooks,
 } from '../../types'
 import type { Indicator } from './ti/index'
 
@@ -162,6 +163,13 @@ export class StrategyContext {
   public previousResult?: DCABacktestingResult
   public multi = false
 
+  // Host hooks (1.8.0) — undefined unless a host sets them
+  public hooks?: DCABacktestHooks
+  /** open time of the last lowest-interval bar processed (-1: none yet) */
+  public hookBarTime = -1
+  /** the last time `afterBar` was called for (-1: none yet) */
+  public hookAfterBarTime = -1
+
   // Reset all data to initial state
   public resetData(): void {
     this.data = []
@@ -209,6 +217,9 @@ export class StrategyContext {
     this.previousResult = undefined
     this.multi = false
     this.lowestDataForBnHSymbol = ''
+    this.hooks = undefined
+    this.hookBarTime = -1
+    this.hookAfterBarTime = -1
 
     // Reset statistics
     this.maxProfit = { asset: 0, usd: 0, perc: 0 }

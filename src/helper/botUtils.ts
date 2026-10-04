@@ -5,7 +5,10 @@ import type { Symbols, GridType, Grid, Currency } from '../types'
 class BotUtils {
   public math: MathHelper
 
-  constructor(private tradesBacktest?: boolean) {
+  // `tradesBacktest` no longer changes anything here — order quantities are
+  // rounded to the lot step the same way in both backtest modes. Kept so the
+  // published constructor signature does not change for consumers.
+  constructor(_tradesBacktest?: boolean) {
     this.math = new MathHelper()
   }
 
@@ -574,9 +577,7 @@ class BotUtils {
         )
       }
       let gridQty = same ? (side === 'SELL' ? sellQty : buyQty) : qty
-      const mod = this.tradesBacktest
-        ? gridQty % symbol.baseAsset.step
-        : this.math.remainder(gridQty, symbol.baseAsset.step)
+      const mod = this.math.gridRemainder(gridQty, symbol.baseAsset.step)
       if (mod > Number.EPSILON) {
         gridQty = this.math.round(
           gridQty - mod + symbol.baseAsset.step,

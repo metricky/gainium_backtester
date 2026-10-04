@@ -1,6 +1,10 @@
 import { v4 } from 'uuid'
 import { StrategyContextManager } from './context'
 import { checkNumber } from '../../helper/utils'
+import {
+  closedOutcomesNewestFirst,
+  hasConsecutiveStreak,
+} from '../../helper/consecutiveStreak'
 import DCABotFunctions from '../../helper/dcaBotFunctions'
 import ComboBotFunctions from '../../helper/comboBotFunctions'
 import {
@@ -67,6 +71,8 @@ import type {
   MAResult,
   DynamicArPrices,
   Sizes,
+  DCABacktestHooks,
+  DealSettingsOverride,
 } from '../../types'
 import {
   BandsResult,
@@ -177,6 +183,8 @@ export type StrategyInput = {
   fullResult?: boolean
   useFile?: boolean
   exchange: ExchangeEnum
+  /** 1.8.0 — optional host hooks; inert when absent */
+  hooks?: DCABacktestHooks
 }
 
 export type DataType = {
@@ -237,6 +245,17 @@ export interface StrategyInterface {
   profitBase: boolean
   stop: boolean
   _start: number
+  // 1.8.0 host control (only used when hooks are set)
+  hostOpenDeals(): Deal[]
+  hostAllDeals(): Deal[]
+  hostLastPrice(symbol: string): number | undefined
+  hostSetDealSettings(
+    dealId: string,
+    override: DealSettingsOverride,
+    time: number,
+  ): boolean
+  hostSetBotSettings(partial: DealSettingsOverride): void
+  hostCloseDeal(dealId: string, price: number, time: number): boolean
 }
 
 enum CandleTypeEnum {
@@ -746,6 +765,187 @@ export abstract class Strategy implements StrategyInterface {
     StrategyContextManager.getActiveContext().resetData()
   }
 
+  // ─── host hooks (1.8.0) — inert unless `hooks` is set ──────────────────────
+
+  static get hooks(): DCABacktestHooks | undefined {
+    return StrategyContextManager.getActiveContext().hooks
+  }
+  static set hooks(value: DCABacktestHooks | undefined) {
+    StrategyContextManager.getActiveContext().hooks = value
+  }
+
+  /** Asks a host approval hook; a hook that throws approves. */
+  private askHost(fn: () => boolean): boolean {
+    try {
+      return fn() !== false
+    } catch {
+      return true
+    }
+  }
+
+  /** The deal's effective settings: the bot's, plus the host's per-deal values. */
+  protected dealSettings(d: Deal): DCABotSettings {
+    return d.settingsOverride
+      ? { ...this.settings, ...d.settingsOverride }
+      : this.settings
+  }
+
+  /** Trailing TP / SL in force on a deal (the bot's unless the host set values). */
+  protected dealTrailing(
+    d: Deal,
+    botFunctions: DCABotFunctions,
+  ): { tp: boolean; sl: boolean } {
+    if (!d.settingsOverride) {
+      return {
+        tp: !!botFunctions.isTrailingTp,
+        sl: !!botFunctions.isTrailingSl,
+      }
+    }
+    const s = this.dealSettings(d)
+    return {
+      tp: !!(
+        s.useTp &&
+        checkNumber(s.tpPerc) &&
+        s.trailingTp &&
+        checkNumber(s.trailingTpPerc) &&
+        !s.useMultiTp
+      ),
+      sl: !!(s.useSl && s.trailingSl && checkNumber(s.slPerc)),
+    }
+  }
+
+  protected dealBaseSlOn(d: Deal) {
+    if (!d.settingsOverride) {
+      return this.baseSlOn
+    }
+    if (Strategy.combo) {
+      return BaseSlOnEnum.avg
+    }
+    const s = this.dealSettings(d)
+    if (s.trailingSl || s.moveSL) {
+      return BaseSlOnEnum.avg
+    }
+    return s.baseSlOn ?? BaseSlOnEnum.avg
+  }
+
+  private findOpenDeal(dealId: string): Deal | undefined {
+    return Strategy.getDeals('open').find((d) => d.id === dealId)
+  }
+
+  /** Open deals as the engine holds them (read-only for the host). */
+  public hostOpenDeals(): Deal[] {
+    return Strategy.getDeals('open')
+  }
+
+  /** Every deal (open and closed) as the engine holds them. */
+  public hostAllDeals(): Deal[] {
+    return Strategy.getDeals()
+  }
+
+  /** The engine's last price of a pair (the close of its last bar). */
+  public hostLastPrice(symbol: string): number | undefined {
+    return Strategy.lastPrice.get(symbol)
+  }
+
+  /**
+   * Sets per-deal values on an open deal (like a deal settings override in
+   * the bot engine). Take-profit orders and the stop line follow at once.
+   */
+  public hostSetDealSettings(
+    dealId: string,
+    override: DealSettingsOverride,
+    time: number,
+  ): boolean {
+    const d = this.findOpenDeal(dealId)
+    const botFunctions = d ? this.botFunctions.get(d.symbol.pair) : undefined
+    if (!d || !botFunctions) {
+      return false
+    }
+    d.settingsOverride = { ...(d.settingsOverride ?? {}), ...override }
+    if (typeof override.slPerc !== 'undefined') {
+      d.slPerc = +(override.slPerc || '0') / 100
+    }
+    if (Strategy.combo) {
+      return true
+    }
+    const s = this.dealSettings(d)
+    const trailing = this.dealTrailing(d, botFunctions)
+    const tpOrders =
+      s.useTp &&
+      !trailing.tp &&
+      (s.dealCloseCondition === CloseConditionEnum.tp || this.tpAr)
+        ? this.getTP(d, undefined, false, false)
+        : []
+    if (!trailing.tp && d.trailingMode === TrailingModeEnum.ttp) {
+      d.trailingMode = undefined
+      d.trailingLevel = 0
+    }
+    d.activeOrders = [
+      ...d.activeOrders.filter(this.filterTpOrders()),
+      ...tpOrders.map((o) => ({ ...o, startTime: time })),
+    ]
+    d.ordersHistory = [
+      ...d.ordersHistory.map((o) =>
+        o.type === DCAOrderTypeEnum.tp &&
+        !o.filledTime &&
+        !d.activeOrders.find(
+          (g) => g.price === o.price && g.side === o.side && g.qty === o.qty,
+        )
+          ? { ...o, filledTime: time }
+          : o,
+      ),
+      ...tpOrders.map((o) => ({ ...o, startTime: time, dealId: d.id })),
+    ]
+    if (trailing.sl || trailing.tp) {
+      this.checkTrailing(d, d.lastPrice, time)
+    } else {
+      const slLine = this.getSlHistoryLine(d, time)
+      this.replaceSlHistoryLine(d, slLine, time)
+    }
+    return true
+  }
+
+  /**
+   * Changes bot settings for deals opened from now on. Open deals keep the
+   * values they had (they are pinned per deal first), as in the bot engine.
+   */
+  public hostSetBotSettings(partial: DealSettingsOverride): void {
+    const keys = Object.keys(partial) as (keyof DealSettingsOverride)[]
+    for (const d of Strategy.getDeals('open')) {
+      const pinned: DealSettingsOverride = { ...(d.settingsOverride ?? {}) }
+      for (const k of keys) {
+        if (!(k in pinned)) {
+          ;(pinned as Record<string, unknown>)[k] = this.settings[k]
+        }
+      }
+      d.settingsOverride = pinned
+    }
+    Object.assign(this.settings, partial)
+  }
+
+  /** Closes one open deal at `price` (a market close by the host). */
+  public hostCloseDeal(dealId: string, price: number, time: number): boolean {
+    const d = this.findOpenDeal(dealId)
+    if (!d) {
+      return false
+    }
+    const b: FullBar = {
+      open: price,
+      high: price,
+      low: price,
+      close: price,
+      time,
+      symbol: d.symbol.pair,
+    }
+    const order = this.getTP(d, price, true, false, time)[0]
+    if (order) {
+      this.updatePositionWithOrder(order, d.symbol.pair)
+    }
+    this.closeDeal(d, b, order)
+    this.processDealCloseFromMap(d)
+    return true
+  }
+
   private usedOrderId: Set<string> = new Set()
 
   static trades?: boolean
@@ -793,7 +993,7 @@ export abstract class Strategy implements StrategyInterface {
   }
 
   private parseComboBacktestNameFlags(name?: string) {
-      const trimmedName = `${name ?? ''}`.trim()
+    const trimmedName = `${name ?? ''}`.trim()
     const separatorIndex = trimmedName.search(/[|#]/)
     const baseNameRaw =
       separatorIndex >= 0 ? trimmedName.slice(0, separatorIndex) : trimmedName
@@ -2063,17 +2263,18 @@ export abstract class Strategy implements StrategyInterface {
     if (!botFunctions) {
       return []
     }
+    const trailing = this.dealTrailing(deal, botFunctions)
     if (
-      this.settings.useSl &&
-      this.settings.dealCloseConditionSL === CloseConditionEnum.tp
+      this.dealSettings(deal).useSl &&
+      this.dealSettings(deal).dealCloseConditionSL === CloseConditionEnum.tp
     ) {
       if (
-        !botFunctions.isTrailingSl &&
+        !trailing.sl &&
         !this.settings.useMultiSl &&
         typeof deal.slPerc !== 'undefined'
       ) {
         const price =
-          (this.baseSlOn === BaseSlOnEnum.avg
+          (this.dealBaseSlOn(deal) === BaseSlOnEnum.avg
             ? deal.avgPrice
             : deal.startPrice) *
           (1 - (deal.slPerc * -1 - this.userFee * 2) * (this.long ? 1 : -1))
@@ -2090,7 +2291,7 @@ export abstract class Strategy implements StrategyInterface {
         ]
       }
       if (
-        (botFunctions.isTrailingSl || botFunctions.isTrailingTp) &&
+        (trailing.sl || trailing.tp) &&
         !this.settings.useMultiSl &&
         typeof deal.slPerc !== 'undefined'
       ) {
@@ -2195,6 +2396,22 @@ export abstract class Strategy implements StrategyInterface {
         IndicatorStartConditionEnum.gt
           ? val < +this.settings.closeAfterXprofitValue
           : val > +this.settings.closeAfterXprofitValue)
+      }
+      const consecutiveWinTarget =
+        this.settings.useCloseAfterXconsecutiveWin &&
+        this.settings.closeAfterXconsecutiveWin
+          ? +this.settings.closeAfterXconsecutiveWin
+          : 0
+      const consecutiveLossTarget =
+        this.settings.useCloseAfterXconsecutiveLoss &&
+        this.settings.closeAfterXconsecutiveLoss
+          ? +this.settings.closeAfterXconsecutiveLoss
+          : 0
+      if ((consecutiveWinTarget || consecutiveLossTarget) && !close) {
+        const outcomes = closedOutcomesNewestFirst(Strategy.getDeals('closed'))
+        close =
+          hasConsecutiveStreak(outcomes, true, consecutiveWinTarget) ||
+          hasConsecutiveStreak(outcomes, false, consecutiveLossTarget)
       }
       if (this.settings.useCloseAfterX && this.settings.closeAfterX && !close) {
         close = !(Strategy.getDealsCount('closed') < +this.settings.closeAfterX)
@@ -2389,6 +2606,15 @@ export abstract class Strategy implements StrategyInterface {
     const symbol = this.symbols.get(s)
     const botFunctions = this.botFunctions.get(s)
     if (!symbol || !botFunctions) {
+      return cbIfNotOpened && cbIfNotOpened()
+    }
+    const approveNewDeal = Strategy.hooks?.approveNewDeal
+    if (
+      !onlyReturn &&
+      approveNewDeal &&
+      !this.askHost(() => approveNewDeal({ symbol: s, price, time: startTime }))
+    ) {
+      // 1.8.0: every engine gate passed and the host said no
       return cbIfNotOpened && cbIfNotOpened()
     }
     if (!onlyReturn) {
@@ -2893,7 +3119,7 @@ export abstract class Strategy implements StrategyInterface {
     if (!botFunctions || !symbol) {
       return { deal: d }
     }
-    if (botFunctions.isTrailingTp) {
+    if (this.dealTrailing(d, botFunctions).tp) {
       return { deal: d }
     }
     const filledTp = d.activeOrders
@@ -4075,15 +4301,17 @@ export abstract class Strategy implements StrategyInterface {
     if (!symbol || !botFunctions) {
       return { deal: d }
     }
+    const trailing = this.dealTrailing(d, botFunctions)
+    const dealSettings = this.dealSettings(d)
     if (
-      this.settings.dealCloseConditionSL !== CloseConditionEnum.tp &&
+      dealSettings.dealCloseConditionSL !== CloseConditionEnum.tp &&
       !this.slAr &&
       !this.settings.useRiskReward &&
       !Strategy.combo &&
       !d.moveSlActivated &&
       !hasUnPnl &&
-      !botFunctions?.isTrailingSl &&
-      !botFunctions?.isTrailingTp
+      !trailing.sl &&
+      !trailing.tp
     ) {
       return { deal: d }
     }
@@ -4159,9 +4387,8 @@ export abstract class Strategy implements StrategyInterface {
         return { deal: d, order: allFilled ? lastSl : undefined }
       }
     } else if (
-      ((botFunctions.isTrailingSl && d.trailingMode === TrailingModeEnum.tsl) ||
-        (botFunctions.isTrailingTp &&
-          d.trailingMode === TrailingModeEnum.ttp)) &&
+      ((trailing.sl && d.trailingMode === TrailingModeEnum.tsl) ||
+        (trailing.tp && d.trailingMode === TrailingModeEnum.ttp)) &&
       !Strategy.combo
     ) {
       if (d.trailingMode && d.trailingLevel) {
@@ -4174,15 +4401,17 @@ export abstract class Strategy implements StrategyInterface {
         }
       }
     } else if (
-      this.settings.useSl &&
+      dealSettings.useSl &&
       typeof d.slPerc !== 'undefined' &&
-      (this.settings.dealCloseConditionSL === CloseConditionEnum.tp ||
+      // the deal's own stop condition: a host may switch a deal's stop on
+      // as a price stop while the bot's stop is off (any stored condition)
+      (dealSettings.dealCloseConditionSL === CloseConditionEnum.tp ||
         (this.settings.moveSL && d.moveSlActivated)) &&
       !Strategy.combo
     ) {
       const sl = d.slPerc
       const refPrice =
-        this.baseSlOn === BaseSlOnEnum.avg ? d.avgPrice : d.startPrice
+        this.dealBaseSlOn(d) === BaseSlOnEnum.avg ? d.avgPrice : d.startPrice
       const diff = this.long ? b.low - refPrice : refPrice - b.high
       if (diff / refPrice - this.userFee * 2 <= sl) {
         close = true
@@ -4213,15 +4442,15 @@ export abstract class Strategy implements StrategyInterface {
         }
       }
     } else if (Strategy.combo) {
-      if (this.settings.useSl || this.settings.useTp) {
-        const slPerc = +(this.settings.slPerc || '0')
-        const tpPerc = +(this.settings.tpPerc || '0')
+      if (dealSettings.useSl || dealSettings.useTp) {
+        const slPerc = +(dealSettings.slPerc || '0')
+        const tpPerc = +(dealSettings.tpPerc || '0')
         const useTp =
-          this.settings.useTp &&
+          dealSettings.useTp &&
           this.settings.dealCloseCondition === CloseConditionEnum.tp
         const useSl =
-          this.settings.useSl &&
-          this.settings.dealCloseConditionSL === CloseConditionEnum.tp
+          dealSettings.useSl &&
+          dealSettings.dealCloseConditionSL === CloseConditionEnum.tp
         const useTrailingTp =
           useTp &&
           (Strategy.combo
@@ -4572,13 +4801,35 @@ export abstract class Strategy implements StrategyInterface {
     const allDeals = Strategy.getDeals('open', b.symbol).filter(
       (d) => (!stop && this.checkMinTp(b.open, d, sl ? 'sl' : 'tp')) || stop,
     )
+    const approveDealClose = Strategy.hooks?.approveDealClose
     for (const d of allDeals) {
-      const position = Strategy.emptyPositon
-      Strategy.position.set(b.symbol, position)
-      const tp = ignoreTp ? undefined : this.getTP(d, b.open, true, false)[0]
-      this.closeDeal(d, b, tp)
-      this.processDealCloseFromMap(d)
+      if (
+        approveDealClose &&
+        !sl &&
+        !stop &&
+        !this.askHost(() =>
+          approveDealClose({
+            dealId: d.id,
+            symbol: d.symbol.pair,
+            price: b.open,
+            time: b.time,
+            trigger: 'indicator',
+          }),
+        )
+      ) {
+        // 1.8.0: a take-profit close signal the host held — the deal stays open
+        continue
+      }
+      this.closeSignalDeal(d, b, ignoreTp)
     }
+  }
+
+  private closeSignalDeal(d: Deal, b: FullBar, ignoreTp: boolean) {
+    const position = Strategy.emptyPositon
+    Strategy.position.set(b.symbol, position)
+    const tp = ignoreTp ? undefined : this.getTP(d, b.open, true, false)[0]
+    this.closeDeal(d, b, tp)
+    this.processDealCloseFromMap(d)
   }
 
   stopByIndicator(b: FullBar) {
@@ -4818,15 +5069,12 @@ export abstract class Strategy implements StrategyInterface {
     if (!botFunctions) {
       return d
     }
-    if (!(botFunctions.isTrailingSl || botFunctions.isTrailingTp)) {
+    const trailing = this.dealTrailing(d, botFunctions)
+    if (!(trailing.sl || trailing.tp)) {
       return d
     }
     const { trailingSl, trailingTp, trailingTpPerc, tpPerc, slPerc } =
-      this.settings
-    const effectiveTrailingTpPerc =
-      Strategy.combo && this.comboNameFlags?.trailingTp
-        ? this.comboNameFlags.trailingTpPerc ?? '5'
-        : trailingTpPerc
+      this.dealSettings(d)
     const sellDisplacement = this.userFee * 2
     if (!d.bestPrice && d.bestPriceSet) {
       d.bestPrice = Math.max(price, d.startPrice)
@@ -4845,7 +5093,7 @@ export abstract class Strategy implements StrategyInterface {
         ? (price - d.avgPrice) / d.avgPrice
         : (d.avgPrice - price) / d.avgPrice
       if (
-        effectiveTrailingTpPerc &&
+        trailingTpPerc &&
         unPnL > +tpPerc / 100 + sellDisplacement
       ) {
         d.trailingMode = TrailingModeEnum.ttp
@@ -4856,12 +5104,12 @@ export abstract class Strategy implements StrategyInterface {
     }
     const sl = (+slPerc / 100 + this.userFee * 2) * (this.long ? 1 : -1)
     const tp =
-      (+(effectiveTrailingTpPerc ?? '0') / 100 + this.userFee * 2) *
+      (+(trailingTpPerc ?? '0') / 100 + this.userFee * 2) *
       (this.long ? 1 : -1)
     const newTrailingLevel = d.bestPrice
       ? d.trailingMode === TrailingModeEnum.tsl && slPerc
         ? d.bestPrice * (1 + sl)
-        : d.trailingMode === TrailingModeEnum.ttp && effectiveTrailingTpPerc
+        : d.trailingMode === TrailingModeEnum.ttp && trailingTpPerc
           ? d.bestPrice * (1 - tp)
           : 0
       : 0
@@ -5337,7 +5585,7 @@ export abstract class Strategy implements StrategyInterface {
     if (!botFunctions) {
       return d
     }
-    if (botFunctions.isTrailingSl /* || botFunctions.isTrailingTp */) {
+    if (this.dealTrailing(d, botFunctions).sl) {
       return d
     }
     if (
@@ -5378,8 +5626,9 @@ export abstract class Strategy implements StrategyInterface {
     time?: number,
   ) {
     const {
-      settings: { tpPerc, useMultiTp, multiTp, useMultiSl, multiSl },
+      settings: { useMultiTp, multiTp, useMultiSl, multiSl },
     } = this
+    const { tpPerc } = this.dealSettings(deal)
     const symbol = this.symbols.get(deal.symbol.pair)
     const botFunctions = this.botFunctions.get(deal.symbol.pair)
     if (!symbol || !botFunctions) {
@@ -5417,7 +5666,7 @@ export abstract class Strategy implements StrategyInterface {
       : 1 - sellDisplacement
     const price = Strategy.combo
       ? deal.avgPrice * priceDisplacement
-      : (sl && this.baseSlOn === BaseSlOnEnum.start
+      : (sl && this.dealBaseSlOn(deal) === BaseSlOnEnum.start
           ? deal.startPrice
           : quote / qty) * priceDisplacement
     let tpPrice = this.math.round(
