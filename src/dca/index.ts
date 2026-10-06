@@ -475,6 +475,11 @@ class DCABacktesting extends Backtesting {
     this.strategy?.hostSetBotSettings(partial)
   }
 
+  /** 1.9.0 — attempt an entry on `symbol` now (engine gates + entry hook). */
+  public hostRequestEntry(symbol: string, time: number): boolean {
+    return this.strategy?.hostRequestEntry(symbol, time) ?? false
+  }
+
   /** Closes one open deal at `price` (market close). */
   public hostCloseDeal(dealId: string, price: number, time: number): boolean {
     return this.strategy?.hostCloseDeal(dealId, price, time) ?? false

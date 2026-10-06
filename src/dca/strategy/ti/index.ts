@@ -1028,6 +1028,7 @@ class TIStrategy extends Strategy implements StrategyInterface {
         const {
           settings: {
             indicatorValue,
+            indicatorValue2,
             indicatorCondition,
             type,
             checkLevel,
@@ -1753,6 +1754,19 @@ class TIStrategy extends Strategy implements StrategyInterface {
             !skipAction
           ) {
             action = this.math.lt(last, value)
+          }
+          if (
+            indicatorCondition === IndicatorStartConditionEnum.bw &&
+            !skipAction
+          ) {
+            const upper =
+              indicatorValue2 !== undefined && indicatorValue2 !== ''
+                ? +indicatorValue2
+                : NaN
+            action =
+              !isNaN(upper) &&
+              this.math.gt(last, Math.min(value, upper)) &&
+              this.math.lt(last, Math.max(value, upper))
           }
 
           if (

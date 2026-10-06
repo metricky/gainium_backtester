@@ -157,7 +157,7 @@ class DCABotFunctions {
     let baseQty =
       orderSizeType === OrderSizeTypeEnum.usd
         ? this.math.round(
-            baseOrderSize / (usdPrice * latestPrice),
+            baseOrderSize / (usdPrice * latestPrice) + (sizes?.base ?? 0),
             precision,
             true,
           )
@@ -654,7 +654,11 @@ class DCABotFunctions {
         }
         let qty =
           orderSizeType === OrderSizeTypeEnum.usd
-            ? this.math.round(orderSize / (usdPrice * latestPrice), precision)
+            ? this.math.round(
+                orderSize / (usdPrice * latestPrice) +
+                  (sizes?.dca?.[i - 1] ?? 0),
+                precision,
+              )
             : orderSizeType === OrderSizeTypeEnum.quote
               ? this.math.round(
                   ((orderSize * (coinm ? symbol.quoteAsset.minAmount : 1)) /

@@ -80,7 +80,7 @@ class ComboBotFunctions extends DcaBotFunctions {
     let baseQty =
       orderSizeType === OrderSizeTypeEnum.usd
         ? this.math.round(
-            baseOrderSize / (usdPrice * latestPrice),
+            baseOrderSize / (usdPrice * latestPrice) + (sizes?.base ?? 0),
             precision,
             true,
           )
@@ -440,7 +440,8 @@ class ComboBotFunctions extends DcaBotFunctions {
         let qty =
           orderSizeType === OrderSizeTypeEnum.usd
             ? this.math.round(
-                baseOrderSize / (usdPrice * latestPrice),
+                baseOrderSize / (usdPrice * latestPrice) +
+                  (sizes?.dca?.[i - 1] ?? 0),
                 precision,
                 true,
               )

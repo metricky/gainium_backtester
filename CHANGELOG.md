@@ -5,6 +5,29 @@ All notable changes to the Gainium Backtester library will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.11.0] - 2026-10-06
+
+### Added
+
+- Indicator condition `bw` ("between"): a value-type indicator (RSI, CCI, MFI, Williams %R, ADX, …) matches while its value is strictly between `indicatorValue` and the new optional `indicatorValue2` (bounds in either order). Same result as two indicators with "greater than" and "lower than" in one AND group. Without a numeric `indicatorValue2` the condition never matches.
+
+## [1.10.0] - 2026-10-05
+
+### Added
+
+- `approveNewDeal` may answer `sizeScope: 'base'` with a size multiplier: only the base order scales and the DCA orders keep their configured size (`'whole'`, the default, scales both). The deal records `sizeScope`.
+
+## [1.9.0] - 2026-10-05
+
+### Added
+
+- **Size multiplier on an approved entry.** `approveNewDeal` may answer `{approve, sizeMultiplier}` (a boolean still works). The multiplier (0.1–3) scales the new deal's base order and every safety order, on top of compound / risk-reduction sizes, for base, quote and USD size types on DCA and Combo; % of balance sizes and risk/reward sizing keep the configured size. The deal records `sizeMultiplier`.
+- **`hostRequestEntry(symbol, time)`.** A host may attempt an entry on a pair at a later bar; every engine gate (max deals, cooldowns, range …) and the entry hook run as for the bot's own start condition.
+
+### Fixed
+
+- USD-sized orders now honour per-deal size deltas (`sizes`) like base and quote sizes. Nothing set them for USD sizes before, so results are unchanged.
+
 ## [1.8.1] - 2026-10-03
 
 ### Fixed

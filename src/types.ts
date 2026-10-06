@@ -122,6 +122,8 @@ export enum IndicatorStartConditionEnum {
   cu = 'cu',
   gt = 'gt',
   lt = 'lt',
+  /** value-type indicators only: indicatorValue < value < indicatorValue2 */
+  bw = 'bw',
 }
 
 export enum ExchangeIntervals {
@@ -441,6 +443,8 @@ export type SettingsIndicators = {
   type: IndicatorEnum
   indicatorLength: number
   indicatorValue: string
+  /** upper bound for IndicatorStartConditionEnum.bw */
+  indicatorValue2?: string
   indicatorCondition: IndicatorStartConditionEnum
   groupId: string
   uuid: string
@@ -1321,6 +1325,10 @@ export type Deal = {
   lastIndex: number
   dynamicAr?: DynamicArPrices[]
   sizes?: Sizes
+  /** 1.9.0 — the size multiplier a host approval applied (absent = 1) */
+  sizeMultiplier?: number
+  /** 1.10.0 — what it scaled (absent with a multiplier = whole) */
+  sizeScope?: 'base' | 'whole'
   /** 1.8.0 — values a host set on this deal; absent = the bot's settings */
   settingsOverride?: DealSettingsOverride
 }
@@ -1445,8 +1453,25 @@ export type BarHookContext = {
  * answer on the same bar, exactly where it would have acted. `true` (or a hook
  * that throws) is the engine's own behaviour.
  */
+/**
+ * 1.9.0 — an approval may carry a size multiplier for the new deal: its base
+ * order and every safety order are scaled by it (base / quote / usd size types,
+ * not with risk/reward sizing; 0.1–3). A plain boolean still works.
+ */
+export type NewDealApprovalAnswer = {
+  approve: boolean
+  sizeMultiplier?: number
+  /**
+   * 1.10.0 — what the multiplier scales: `whole` (default) the base order and
+   * every DCA order, `base` the base order only (DCA orders keep their size).
+   */
+  sizeScope?: 'base' | 'whole'
+}
+
 export type DCABacktestHooks = {
-  approveNewDeal?: (ctx: NewDealApprovalContext) => boolean
+  approveNewDeal?: (
+    ctx: NewDealApprovalContext,
+  ) => boolean | NewDealApprovalAnswer
   approveDealClose?: (ctx: DealCloseApprovalContext) => boolean
   afterBar?: (ctx: BarHookContext) => void
 }

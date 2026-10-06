@@ -73,6 +73,7 @@ import type {
   Sizes,
   DCABacktestHooks,
   DealSettingsOverride,
+  NewDealApprovalAnswer,
 } from '../../types'
 import {
   BandsResult,
@@ -256,6 +257,7 @@ export interface StrategyInterface {
   ): boolean
   hostSetBotSettings(partial: DealSettingsOverride): void
   hostCloseDeal(dealId: string, price: number, time: number): boolean
+  hostRequestEntry(symbol: string, time: number): boolean
 }
 
 enum CandleTypeEnum {
@@ -774,6 +776,59 @@ export abstract class Strategy implements StrategyInterface {
     StrategyContextManager.getActiveContext().hooks = value
   }
 
+  /**
+   * 1.9.0 — asks the host's entry hook; a hook that throws approves at the
+   * configured size. Returns the multiplier to apply (1 = configured size)
+   * or null when refused.
+   */
+  private askHostEntry(
+    fn: () => boolean | NewDealApprovalAnswer,
+  ): { m: number; scope: 'base' | 'whole' } | null {
+    let r: boolean | NewDealApprovalAnswer
+    try {
+      r = fn()
+    } catch {
+      return { m: 1, scope: 'whole' }
+    }
+    if (r === false) {
+      return null
+    }
+    if (r && typeof r === 'object') {
+      if (r.approve === false) {
+        return null
+      }
+      const m = Number(r.sizeMultiplier)
+      return {
+        m: Number.isFinite(m) && m > 0 ? m : 1,
+        scope: r.sizeScope === 'base' ? 'base' : 'whole',
+      }
+    }
+    return { m: 1, scope: 'whole' }
+  }
+
+  /**
+   * 1.9.0 — the multiplier the engine can apply to a new deal, or 1: base /
+   * quote / usd size types only, not with risk/reward sizing, within 0.1–3.
+   */
+  protected applicableSizeMultiplier(m: number): number {
+    if (!(m !== 1 && m >= 0.1 && m <= 3)) {
+      return 1
+    }
+    if (this.settings.useRiskReward) {
+      return 1
+    }
+    if (
+      ![
+        OrderSizeTypeEnum.base,
+        OrderSizeTypeEnum.quote,
+        OrderSizeTypeEnum.usd,
+      ].includes(this.settings.orderSizeType)
+    ) {
+      return 1
+    }
+    return m
+  }
+
   /** Asks a host approval hook; a hook that throws approves. */
   private askHost(fn: () => boolean): boolean {
     try {
@@ -921,6 +976,22 @@ export abstract class Strategy implements StrategyInterface {
       d.settingsOverride = pinned
     }
     Object.assign(this.settings, partial)
+  }
+
+  /**
+   * 1.9.0 — the host asks the engine to attempt an entry on `symbol` now, at
+   * its last price: every engine gate (max deals, cooldowns, range …) and
+   * the entry hook run as for the bot's own start condition. True = a deal
+   * opened.
+   */
+  public hostRequestEntry(symbol: string, time: number): boolean {
+    const price = Strategy.lastPrice.get(symbol)
+    if (!price || !this.symbols.get(symbol)) {
+      return false
+    }
+    const before = Strategy.getDeals('open').length
+    this.openDeal(price, time, price, price, symbol)
+    return Strategy.getDeals('open').length > before
   }
 
   /** Closes one open deal at `price` (a market close by the host). */
@@ -2609,13 +2680,18 @@ export abstract class Strategy implements StrategyInterface {
       return cbIfNotOpened && cbIfNotOpened()
     }
     const approveNewDeal = Strategy.hooks?.approveNewDeal
-    if (
-      !onlyReturn &&
-      approveNewDeal &&
-      !this.askHost(() => approveNewDeal({ symbol: s, price, time: startTime }))
-    ) {
-      // 1.8.0: every engine gate passed and the host said no
-      return cbIfNotOpened && cbIfNotOpened()
+    let sizeMultiplier = 1
+    let sizeScope: 'base' | 'whole' = 'whole'
+    if (!onlyReturn && approveNewDeal) {
+      const answer = this.askHostEntry(() =>
+        approveNewDeal({ symbol: s, price, time: startTime }),
+      )
+      if (answer === null) {
+        // 1.8.0: every engine gate passed and the host said no
+        return cbIfNotOpened && cbIfNotOpened()
+      }
+      sizeMultiplier = this.applicableSizeMultiplier(answer.m)
+      sizeScope = answer.scope
     }
     if (!onlyReturn) {
       Strategy.lastOpenedDeal = startTime
@@ -2650,7 +2726,7 @@ export abstract class Strategy implements StrategyInterface {
             ? o.type !== DCAOrderTypeEnum.sl
             : true) && o.type !== DCAOrderTypeEnum.grid,
       )
-    const sizes = this.calculateCompoundReduce(initialOrders)
+    let sizes = this.calculateCompoundReduce(initialOrders)
     if (sizes) {
       initialOrders = botFunctions
         .createOrders(
@@ -2675,6 +2751,41 @@ export abstract class Strategy implements StrategyInterface {
               ? o.type !== DCAOrderTypeEnum.sl
               : true) && o.type !== DCAOrderTypeEnum.grid,
         )
+    }
+    if (sizeMultiplier !== 1) {
+      // 1.9.0: the host's multiplier scales the base order and (scope
+      // `whole`) every DCA order, on top of any compound / risk-reduction sizes
+      const bo = initialOrders.find((o) => o.type === DCAOrderTypeEnum.bo)
+      const dcas = initialOrders.filter((o) => o.type === DCAOrderTypeEnum.dca)
+      const dcaFactor = sizeScope === 'base' ? 0 : sizeMultiplier - 1
+      const scaled: Sizes = {
+        base: (sizes?.base ?? 0) + (sizeMultiplier - 1) * (bo?.qty ?? 0),
+        dca: dcas.map((o, i) => (sizes?.dca?.[i] ?? 0) + dcaFactor * o.qty),
+      }
+      initialOrders = botFunctions
+        .createOrders(
+          this.usdRateQuote.get(s) ?? 0,
+          orderPrice,
+          true,
+          undefined,
+          undefined,
+          this.getBalances(s),
+          true,
+          [],
+          true,
+          fixSl,
+          fixTp,
+          fixSize,
+          dynamicAr,
+          scaled,
+        )
+        .filter(
+          (o) =>
+            (!this.settings.useRiskReward && !this.slAr
+              ? o.type !== DCAOrderTypeEnum.sl
+              : true) && o.type !== DCAOrderTypeEnum.grid,
+        )
+      sizes = scaled
     }
     const allInitialOrder = [...initialOrders]
     initialOrders = initialOrders.filter((o) =>
@@ -2778,6 +2889,7 @@ export abstract class Strategy implements StrategyInterface {
       },
       dynamicAr,
       sizes: sizes ?? undefined,
+      ...(sizeMultiplier !== 1 ? { sizeMultiplier, sizeScope } : {}),
     }
 
     if (
